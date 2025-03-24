@@ -14,8 +14,8 @@
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 BLECharacteristic *pCharacteristic;
-uint32_t sequenceNumber = 0; // 序列号
-const int DATA_SIZE = 160;    // 定义数据块大小
+uint32_t sequenceNumber = 0; // Sequence number
+const int DATA_SIZE = 160;    // Define data block size
 uint8_t data[DATA_SIZE];
 bool deviceConnected = false; // Flag to track client connection
 
@@ -34,6 +34,20 @@ class MyServerCallbacks: public BLEServerCallbacks {
   }
 };
 
+// Custom characteristic callbacks to handle write events
+class MyCharacteristicCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    std::string rxValue = pCharacteristic->getValue();
+    if (rxValue.length() > 0) {
+      Serial.print("Received Value: ");
+      for (int i = 0; i < rxValue.length(); i++) {
+        Serial.print(rxValue[i]);
+      }
+      Serial.println();
+    }
+  }
+};
+
 void sendData() {
   // Add the sequence number (stored in bytes 2-5)
   data[2] = (sequenceNumber >> 24) & 0xFF; // Most significant byte
@@ -48,13 +62,13 @@ void sendData() {
 
   data[DATA_SIZE - 2] = 0xFE; // Footer byte 1
   data[DATA_SIZE - 1] = 0xFE; // Footer byte 2
+
   // Only send notification if a client is connected
   if (deviceConnected) {
     pCharacteristic->setValue(data, sizeof(data));
     pCharacteristic->notify(); // Notify the client that data has been updated
     sequenceNumber++; // Increase the sequence number
   }
-  
 }
 
 // Timer callback to periodically send data
@@ -82,6 +96,9 @@ void setup() {
       BLECharacteristic::PROPERTY_NOTIFY
   );
 
+  // Set the custom callback for write events
+  pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
+
   // Add the Client Characteristic Configuration Descriptor to allow notifications
   pCharacteristic->addDescriptor(new BLE2902());
 
@@ -99,5 +116,5 @@ void setup() {
 }
 
 void loop() {
-
+  // put your main code here, to run repeatedly:
 }

@@ -20,13 +20,20 @@ bool bleAdvertising = false;
 // Global pointer for client mode
 BLEClient* pClient = nullptr;
 
-// Global variables for caching remote pointers (for client mode)
+// Global variables for caching remote pointers (for reading/notification)
 String globalServiceUUID = "";
 String globalCharacteristicUUID = "";
 BLERemoteService* remoteServicePtr = nullptr;
 BLERemoteCharacteristic* remoteCharacteristicPtr = nullptr;
 
 # define VERSION "0.1"
+// Global variables for caching remote pointers for writing
+
+
+String globalWriteServiceUUID = "";
+String globalWriteCharacteristicUUID = "";
+BLERemoteService* remoteWriteServicePtr = nullptr;
+BLERemoteCharacteristic* remoteWriteCharacteristicPtr = nullptr;
 
 //-------------------------//
 // Notify Callback         //
@@ -249,7 +256,7 @@ void processATCommand(String cmd) {
     Serial.println("OK");
   }
   else if (cmd == "AT+VERSION?") {
-    Serial.print("ESP32-S3-AT Firmware Version");
+    Serial.print("ESP32-S3-AT Firmware Version ");
     Serial.println(VERSION);
   }
   else if (cmd == "AT+BLESTART") {
@@ -282,7 +289,7 @@ void processATCommand(String cmd) {
     discoverServices();
     Serial.println("OK");
   }
-  // Set and cache remote service UUID
+  // Set and cache remote service UUID for reading
   else if (cmd.startsWith("AT+BLESETSERVICE=")) {
     String svcUuid = cmd.substring(String("AT+BLESETSERVICE=").length());
     svcUuid.trim();
@@ -308,7 +315,7 @@ void processATCommand(String cmd) {
       Serial.println("Not connected to any device. Pointer caching deferred.");
     }
   }
-  // Set and cache remote characteristic UUID
+  // Set and cache remote characteristic UUID for reading
   else if (cmd.startsWith("AT+BLESETCHAR=")) {
     String charUuid = cmd.substring(String("AT+BLESETCHAR=").length());
     charUuid.trim();
@@ -363,6 +370,61 @@ void processATCommand(String cmd) {
       Serial.println("Notifications disabled");
     }
   }
+  // Set and cache remote service UUID for writing
+  else if (cmd.startsWith("AT+BLESETWRITESERVICE=")) {
+    String svcUuid = cmd.substring(String("AT+BLESETWRITESERVICE=").length());
+    svcUuid.trim();
+    globalWriteServiceUUID = svcUuid;
+    Serial.print("Write Service UUID set to: ");
+    Serial.println(globalWriteServiceUUID);
+    if (pClient != nullptr && pClient->isConnected()) {
+      remoteWriteServicePtr = pClient->getService(BLEUUID(globalWriteServiceUUID.c_str()));
+      if (remoteWriteServicePtr != nullptr) {
+        Serial.println("Write Service pointer acquired.");
+        if (globalWriteCharacteristicUUID.length() > 0) {
+          remoteWriteCharacteristicPtr = remoteWriteServicePtr->getCharacteristic(BLEUUID(globalWriteCharacteristicUUID.c_str()));
+          if (remoteWriteCharacteristicPtr != nullptr) {
+            Serial.println("Write Characteristic pointer acquired.");
+          } else {
+            Serial.println("Write Characteristic pointer not found.");
+          }
+        }
+      } else {
+        Serial.println("Write Service not found on remote device.");
+      }
+    } else {
+      Serial.println("Not connected to any device. Write pointer caching deferred.");
+    }
+  }
+  // Set and cache remote characteristic UUID for writing
+  else if (cmd.startsWith("AT+BLESETWRITECHAR=")) {
+    String charUuid = cmd.substring(String("AT+BLESETWRITECHAR=").length());
+    charUuid.trim();
+    globalWriteCharacteristicUUID = charUuid;
+    Serial.print("Write Characteristic UUID set to: ");
+    Serial.println(globalWriteCharacteristicUUID);
+    if (remoteWriteServicePtr != nullptr) {
+      remoteWriteCharacteristicPtr = remoteWriteServicePtr->getCharacteristic(BLEUUID(globalWriteCharacteristicUUID.c_str()));
+      if (remoteWriteCharacteristicPtr != nullptr) {
+        Serial.println("Write Characteristic pointer acquired.");
+      } else {
+        Serial.println("Write Characteristic not found in cached write service.");
+      }
+    } else {
+      Serial.println("Write Service pointer not set. Set write service first.");
+    }
+  }
+  // Write data to the cached write characteristic
+  else if (cmd.startsWith("AT+BLEWRITE=")) {
+    String data = cmd.substring(String("AT+BLEWRITE=").length());
+    data.trim();
+    if (remoteWriteCharacteristicPtr == nullptr) {
+      Serial.println("ERROR: Write Characteristic pointer not set. Use AT+BLESETWRITESERVICE and AT+BLESETWRITECHAR first.");
+    } else {
+      remoteWriteCharacteristicPtr->writeValue(data.c_str(), data.length());
+      Serial.println("Data written");
+    }
+  }
   else {
     Serial.println("ERROR: Unknown Command");
   }
@@ -371,12 +433,11 @@ void processATCommand(String cmd) {
 void setup() {
   Serial.begin(115200);
   while (!Serial) { ; }  // Wait for serial port
-  Serial.print("AT Command Firmware Starting ");
-  Serial.println(VERSION);
+  Serial.println("AT Command Firmware Starting");
 }
 
 void loop() {
-  // Read incoming characters from Serial and process complete commands.
+  // Read incoming characters from Serial and process complete commands
   while (Serial.available()) {
     char inChar = (char)Serial.read();
     if (inChar == '\n' || inChar == '\r') {
