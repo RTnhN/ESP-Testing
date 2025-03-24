@@ -1,8 +1,8 @@
 #include <Arduino.h>
-
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <BLE2902.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/timers.h>
@@ -15,69 +15,87 @@
 
 BLECharacteristic *pCharacteristic;
 uint32_t sequenceNumber = 0; // 序列号
-const int DATA_SIZE =80; // 定义数据块大小
+const int DATA_SIZE = 160;    // 定义数据块大小
 uint8_t data[DATA_SIZE];
+bool deviceConnected = false; // Flag to track client connection
 
+// Custom server callbacks to manage connection status
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    deviceConnected = true;
+    Serial.println("Client connected");
+  }
+
+  void onDisconnect(BLEServer* pServer) override {
+    deviceConnected = false;
+    Serial.println("Client disconnected");
+    // Restart advertising so new clients can connect
+    BLEDevice::startAdvertising();
+  }
+};
 
 void sendData() {
-  // 创建要发送的数据
-
-  // Add the sequence number
+  // Add the sequence number (stored in bytes 2-5)
   data[2] = (sequenceNumber >> 24) & 0xFF; // Most significant byte
   data[3] = (sequenceNumber >> 16) & 0xFF;
   data[4] = (sequenceNumber >> 8) & 0xFF;
   data[5] = sequenceNumber & 0xFF; // Least significant byte
 
-  // Fill the middle part with some data
-  for (int i = 6; i < 78; i++) {
-    data[i] = (uint8_t)(i - 6); // Just an example, fill with incremental values
+  // Fill the middle part with incremental data as an example
+  for (int i = 6; i < DATA_SIZE - 2; i++) {
+    data[i] = (uint8_t)(i - 6);
   }
 
-  data[78] = 0xFE; // Footer byte 1
-  data[79] = 0xFE; // Footer byte 2
-    
-  // 发送数据
-  pCharacteristic->setValue(data, sizeof(data));
-  pCharacteristic->notify(); // 通知客户端数据已更新
-  sequenceNumber++; // 增加序列号
+  data[DATA_SIZE - 2] = 0xFE; // Footer byte 1
+  data[DATA_SIZE - 1] = 0xFE; // Footer byte 2
+  // Only send notification if a client is connected
+  if (deviceConnected) {
+    pCharacteristic->setValue(data, sizeof(data));
+    pCharacteristic->notify(); // Notify the client that data has been updated
+    sequenceNumber++; // Increase the sequence number
+  }
+  
 }
 
-// 定时器回调函数
+// Timer callback to periodically send data
 void onTimer(TimerHandle_t xTimer) {
-    sendData();
+  sendData();
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Starting BLE work!");
-  // Create the start of data packet 
+
+  // Create the start of the data packet (Header bytes)
   data[0] = 0xFF; // Header byte 1
   data[1] = 0xFF; // Header byte 2
 
   BLEDevice::init("Device1");
   BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
-    
+
   pCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
-    );
+      BLECharacteristic::PROPERTY_READ |
+      BLECharacteristic::PROPERTY_WRITE |
+      BLECharacteristic::PROPERTY_NOTIFY
+  );
 
-  //pCharacteristic->setValue("Hello World");
+  // Add the Client Characteristic Configuration Descriptor to allow notifications
+  pCharacteristic->addDescriptor(new BLE2902());
 
   pService->start();
-  // BLEAdvertising *pAdvertising = pServer->getAdvertising();  // this still is working for backward compatibility
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x06);
   pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
   Serial.println("BLE Server started, waiting for clients...");
 
-  // 创建定时器
-  TimerHandle_t timer = xTimerCreate("DataTimer", pdMS_TO_TICKS(10), pdTRUE, (void *)0, onTimer);
-  xTimerStart(timer, 0); // 启动定时器
+  TimerHandle_t timer = xTimerCreate("DataTimer", pdMS_TO_TICKS(20), pdTRUE, (void *)0, onTimer);
+  xTimerStart(timer, 0);
 }
 
 void loop() {
