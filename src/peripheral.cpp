@@ -84,7 +84,7 @@ void setup() {
   data[0] = 0xFF; // Header byte 1
   data[1] = 0xFF; // Header byte 2
 
-  BLEDevice::init("Device1");
+  BLEDevice::init("NewNode");
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
