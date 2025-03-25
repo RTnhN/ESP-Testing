@@ -15,7 +15,7 @@
 
 BLECharacteristic *pCharacteristic;
 uint32_t sequenceNumber = 0; // Sequence number
-const int DATA_SIZE = 160;    // Define data block size
+const int DATA_SIZE = 80;    // Define data block size
 uint8_t data[DATA_SIZE];
 bool deviceConnected = false; // Flag to track client connection
 
@@ -111,7 +111,7 @@ void setup() {
   BLEDevice::startAdvertising();
   Serial.println("BLE Server started, waiting for clients...");
 
-  TimerHandle_t timer = xTimerCreate("DataTimer", pdMS_TO_TICKS(20), pdTRUE, (void *)0, onTimer);
+  TimerHandle_t timer = xTimerCreate("DataTimer", pdMS_TO_TICKS(10), pdTRUE, (void *)0, onTimer);
   xTimerStart(timer, 0);
 }
 
