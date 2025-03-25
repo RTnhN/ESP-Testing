@@ -9,34 +9,46 @@
 // Server mode default UUIDs (for example)
 #define SERVER_SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
 #define SERVER_CHARACTERISTIC_UUID "abcdefab-cdef-abcd-efab-cdefabcdefab"
+#define VERSION "0.1"
 
-// Global flags and pointers for server mode
+//-------------------------//
+// Global Server Variables //
+//-------------------------//
 BLEServer* pServer = nullptr;
 BLEService* pService = nullptr;
 BLECharacteristic* pCharacteristic = nullptr;
 bool bleInitialized = false;
 bool bleAdvertising = false;
 
-// Global pointer for client mode
-BLEClient* pClient = nullptr;
-
-// Global variables for caching remote pointers (for reading/notification)
-String globalServiceUUID = "";
-String globalCharacteristicUUID = "";
-BLERemoteService* remoteServicePtr = nullptr;
-BLERemoteCharacteristic* remoteCharacteristicPtr = nullptr;
-
-# define VERSION "0.1"
-// Global variables for caching remote pointers for writing
-
-
-String globalWriteServiceUUID = "";
-String globalWriteCharacteristicUUID = "";
-BLERemoteService* remoteWriteServicePtr = nullptr;
-BLERemoteCharacteristic* remoteWriteCharacteristicPtr = nullptr;
+String clientName = "";
 
 //-------------------------//
-// Notify Callback         //
+// Multi-Client Structures //
+//-------------------------//
+
+struct BLEClientConnection {
+  BLEClient* client;
+  String deviceAddress;
+  // Cached pointers for reading
+  String serviceUUID;
+  String characteristicUUID;
+  BLERemoteService* remoteServicePtr;
+  BLERemoteCharacteristic* remoteCharacteristicPtr;
+  // Cached pointers for writing
+  String writeServiceUUID;
+  String writeCharacteristicUUID;
+  BLERemoteService* remoteWriteServicePtr;
+  BLERemoteCharacteristic* remoteWriteCharacteristicPtr;
+};
+
+std::map<int, BLEClientConnection*> clientConnections;
+int nextClientId = 1;
+
+// Map to associate a remote characteristic with a client ID for notifications
+std::map<BLERemoteCharacteristic*, int> notifyMap;
+
+//-------------------------//
+// Notification Callback   //
 //-------------------------//
 
 void notifyCallback(
@@ -44,7 +56,14 @@ void notifyCallback(
   uint8_t* pData,
   size_t length,
   bool isNotify) {
-  Serial.print("Notification received (hex): ");
+  
+  int clientId = -1;
+  if (notifyMap.find(pBLERemoteCharacteristic) != notifyMap.end()) {
+    clientId = notifyMap[pBLERemoteCharacteristic];
+  }
+  Serial.print("Notification received from client ");
+  Serial.print(clientId);
+  Serial.print(" (hex): ");
   for (size_t i = 0; i < length; i++) {
     uint8_t byte = pData[i];
     if (byte < 0x10) Serial.print("0");
@@ -150,32 +169,37 @@ void scanBLEDevices() {
   Serial.println("Scan complete");
 }
 
-void connectToDevice(String deviceAddress) {
-  if (pClient != nullptr && pClient->isConnected()) {
-    Serial.println("Already connected to a device.");
-    return;
-  }
-  if (!bleInitialized) {
-    BLEDevice::init("ESP32-AT");
-    bleInitialized = true;
-  }
-  pClient = BLEDevice::createClient();
+int connectToDeviceMulti(String deviceAddress) {
+  BLEClient* newClient = BLEDevice::createClient();
   Serial.println("Created BLE client");
   BLEAddress addr(deviceAddress.c_str());
-  if (pClient->connect(addr)) {
+  if (newClient->connect(addr)) {
     Serial.println("Connected to device: " + deviceAddress);
+    BLEClientConnection* connection = new BLEClientConnection();
+    connection->client = newClient;
+    connection->deviceAddress = deviceAddress;
+    connection->remoteServicePtr = nullptr;
+    connection->remoteCharacteristicPtr = nullptr;
+    connection->remoteWriteServicePtr = nullptr;
+    connection->remoteWriteCharacteristicPtr = nullptr;
+    int clientId = nextClientId++;
+    clientConnections[clientId] = connection;
+    Serial.print("Assigned Client ID: ");
+    Serial.println(clientId);
+    return clientId;
   } else {
     Serial.println("Failed to connect to device: " + deviceAddress);
+    return -1;
   }
 }
 
-void discoverServices() {
-  if (pClient == nullptr || !pClient->isConnected()) {
-    Serial.println("Not connected to any device.");
+void discoverServicesMulti(BLEClientConnection* connection) {
+  if (connection == nullptr || connection->client == nullptr || !connection->client->isConnected()) {
+    Serial.println("Client not connected.");
     return;
   }
   Serial.println("Discovering services and characteristics...");
-  auto servicesMap = pClient->getServices();
+  auto servicesMap = connection->client->getServices();
   if (servicesMap == nullptr || servicesMap->empty()) {
     Serial.println("No services found.");
   } else {
@@ -196,17 +220,16 @@ void discoverServices() {
   Serial.println("Service discovery complete.");
 }
 
-// Standard read using cached pointers that prints full binary data in hex
-void readCachedCharacteristic() {
-  if (pClient == nullptr || !pClient->isConnected()) {
-    Serial.println("Not connected to any device.");
+void readCachedCharacteristicMulti(BLEClientConnection* connection) {
+  if (connection == nullptr || connection->client == nullptr || !connection->client->isConnected()) {
+    Serial.println("Client not connected.");
     return;
   }
-  if (remoteCharacteristicPtr == nullptr) {
+  if (connection->remoteCharacteristicPtr == nullptr) {
     Serial.println("Characteristic pointer not set. Use AT+BLESETSERVICE and AT+BLESETCHAR.");
     return;
   }
-  std::string value = remoteCharacteristicPtr->readValue();
+  std::string value = connection->remoteCharacteristicPtr->readValue();
   Serial.print("Read value (hex): ");
   for (size_t i = 0; i < value.size(); i++) {
     uint8_t byte = value[i];
@@ -217,13 +240,12 @@ void readCachedCharacteristic() {
   Serial.println();
 }
 
-// Fallback read using UUIDs if caching pointers are not used
-void readCharacteristic(String serviceUuid, String charUuid) {
-  if (pClient == nullptr || !pClient->isConnected()) {
-    Serial.println("Not connected to any device.");
+void readCharacteristicMulti(BLEClientConnection* connection, String serviceUuid, String charUuid) {
+  if (connection == nullptr || connection->client == nullptr || !connection->client->isConnected()) {
+    Serial.println("Client not connected.");
     return;
   }
-  BLERemoteService* remoteService = pClient->getService(BLEUUID(serviceUuid.c_str()));
+  BLERemoteService* remoteService = connection->client->getService(BLEUUID(serviceUuid.c_str()));
   if (remoteService == nullptr) {
     Serial.println("Service not found: " + serviceUuid);
     return;
@@ -279,151 +301,272 @@ void processATCommand(String cmd) {
     scanBLEDevices();
     Serial.println("OK");
   }
+  // Connect to device: AT+BLECONNECT=<device_address>
   else if (cmd.startsWith("AT+BLECONNECT=")) {
-    String addr = cmd.substring(14);
+    String addr = cmd.substring(String("AT+BLECONNECT=").length());
     addr.trim();
-    connectToDevice(addr);
-    Serial.println("OK");
-  }
-  else if (cmd == "AT+BLEDISCOVER") {
-    discoverServices();
-    Serial.println("OK");
-  }
-  // Set and cache remote service UUID for reading
-  else if (cmd.startsWith("AT+BLESETSERVICE=")) {
-    String svcUuid = cmd.substring(String("AT+BLESETSERVICE=").length());
-    svcUuid.trim();
-    globalServiceUUID = svcUuid;
-    Serial.print("Service UUID set to: ");
-    Serial.println(globalServiceUUID);
-    if (pClient != nullptr && pClient->isConnected()) {
-      remoteServicePtr = pClient->getService(BLEUUID(globalServiceUUID.c_str()));
-      if (remoteServicePtr != nullptr) {
-        Serial.println("Service pointer acquired.");
-        if (globalCharacteristicUUID.length() > 0) {
-          remoteCharacteristicPtr = remoteServicePtr->getCharacteristic(BLEUUID(globalCharacteristicUUID.c_str()));
-          if (remoteCharacteristicPtr != nullptr) {
-            Serial.println("Characteristic pointer acquired.");
-          } else {
-            Serial.println("Characteristic pointer not found.");
-          }
-        }
-      } else {
-        Serial.println("Service not found on remote device.");
-      }
+    int clientId = connectToDeviceMulti(addr);
+    if (clientId != -1) {
+      Serial.print("OK, Client ID: ");
+      Serial.println(clientId);
     } else {
-      Serial.println("Not connected to any device. Pointer caching deferred.");
+      Serial.println("ERROR: Connection failed.");
     }
   }
-  // Set and cache remote characteristic UUID for reading
-  else if (cmd.startsWith("AT+BLESETCHAR=")) {
-    String charUuid = cmd.substring(String("AT+BLESETCHAR=").length());
-    charUuid.trim();
-    globalCharacteristicUUID = charUuid;
-    Serial.print("Characteristic UUID set to: ");
-    Serial.println(globalCharacteristicUUID);
-    if (remoteServicePtr != nullptr) {
-      remoteCharacteristicPtr = remoteServicePtr->getCharacteristic(BLEUUID(globalCharacteristicUUID.c_str()));
-      if (remoteCharacteristicPtr != nullptr) {
-        Serial.println("Characteristic pointer acquired.");
-      } else {
-        Serial.println("Characteristic not found in cached service.");
-      }
+  // Discover services: AT+BLEDISCOVER=<clientId>
+  else if (cmd.startsWith("AT+BLEDISCOVER=")) {
+    String param = cmd.substring(String("AT+BLEDISCOVER=").length());
+    param.trim();
+    int clientId = param.toInt();
+    if (clientConnections.find(clientId) == clientConnections.end()) {
+      Serial.println("ERROR: Client ID not found.");
     } else {
-      Serial.println("Service pointer not set. Set service first.");
-    }
-  }
-  // Standard read command using cached pointers
-  else if (cmd == "AT+BLEREAD") {
-    readCachedCharacteristic();
-    Serial.println("OK");
-  }
-  else if (cmd.startsWith("AT+BLEREAD=")) {
-    String params = cmd.substring(11);
-    int commaIndex = params.indexOf(",");
-    if (commaIndex == -1) {
-      Serial.println("ERROR: Invalid parameters. Use AT+BLEREAD=<service_uuid>,<characteristic_uuid>");
-    } else {
-      String svcUuid = params.substring(0, commaIndex);
-      String charUuid = params.substring(commaIndex + 1);
-      svcUuid.trim();
-      charUuid.trim();
-      readCharacteristic(svcUuid, charUuid);
+      discoverServicesMulti(clientConnections[clientId]);
       Serial.println("OK");
     }
   }
-  // Enable notifications using the notify API
-  else if (cmd == "AT+BLENOTIFY") {
-    if (remoteCharacteristicPtr == nullptr) {
-      Serial.println("ERROR: Characteristic pointer not set. Use AT+BLESETSERVICE and AT+BLESETCHAR first.");
+  // Set and cache remote service UUID for reading: AT+BLESETSERVICE=<clientId>,<service_uuid>
+  else if (cmd.startsWith("AT+BLESETSERVICE=")) {
+    String params = cmd.substring(String("AT+BLESETSERVICE=").length());
+    int commaIndex = params.indexOf(",");
+    if (commaIndex == -1) {
+      Serial.println("ERROR: Invalid parameters. Use AT+BLESETSERVICE=<clientId>,<service_uuid>");
     } else {
-      remoteCharacteristicPtr->registerForNotify(notifyCallback);
-      Serial.println("Notifications enabled");
+      String idStr = params.substring(0, commaIndex);
+      String svcUuid = params.substring(commaIndex + 1);
+      idStr.trim();
+      svcUuid.trim();
+      int clientId = idStr.toInt();
+      if (clientConnections.find(clientId) == clientConnections.end()) {
+        Serial.println("ERROR: Client ID not found.");
+      } else {
+        BLEClientConnection* connection = clientConnections[clientId];
+        connection->serviceUUID = svcUuid;
+        Serial.print("Service UUID set to: ");
+        Serial.println(svcUuid);
+        if (connection->client != nullptr && connection->client->isConnected()) {
+          connection->remoteServicePtr = connection->client->getService(BLEUUID(svcUuid.c_str()));
+          if (connection->remoteServicePtr != nullptr) {
+            Serial.println("Service pointer acquired.");
+            if (connection->characteristicUUID.length() > 0) {
+              connection->remoteCharacteristicPtr = connection->remoteServicePtr->getCharacteristic(BLEUUID(connection->characteristicUUID.c_str()));
+              if (connection->remoteCharacteristicPtr != nullptr) {
+                Serial.println("Characteristic pointer acquired.");
+              } else {
+                Serial.println("Characteristic pointer not found.");
+              }
+            }
+          } else {
+            Serial.println("Service not found on remote device.");
+          }
+        } else {
+          Serial.println("Not connected to any device. Pointer caching deferred.");
+        }
+        Serial.println("OK");
+      }
     }
   }
-  // Disable notifications
-  else if (cmd == "AT+BLENOTIFYOFF") {
-    if (remoteCharacteristicPtr == nullptr) {
-      Serial.println("ERROR: Characteristic pointer not set.");
+  // Set and cache remote characteristic UUID for reading: AT+BLESETCHAR=<clientId>,<char_uuid>
+  else if (cmd.startsWith("AT+BLESETCHAR=")) {
+    String params = cmd.substring(String("AT+BLESETCHAR=").length());
+    int commaIndex = params.indexOf(",");
+    if (commaIndex == -1) {
+      Serial.println("ERROR: Invalid parameters. Use AT+BLESETCHAR=<clientId>,<char_uuid>");
     } else {
-      remoteCharacteristicPtr->registerForNotify(nullptr);
-      Serial.println("Notifications disabled");
+      String idStr = params.substring(0, commaIndex);
+      String charUuid = params.substring(commaIndex + 1);
+      idStr.trim();
+      charUuid.trim();
+      int clientId = idStr.toInt();
+      if (clientConnections.find(clientId) == clientConnections.end()) {
+        Serial.println("ERROR: Client ID not found.");
+      } else {
+        BLEClientConnection* connection = clientConnections[clientId];
+        connection->characteristicUUID = charUuid;
+        Serial.print("Characteristic UUID set to: ");
+        Serial.println(charUuid);
+        if (connection->remoteServicePtr != nullptr) {
+          connection->remoteCharacteristicPtr = connection->remoteServicePtr->getCharacteristic(BLEUUID(charUuid.c_str()));
+          if (connection->remoteCharacteristicPtr != nullptr) {
+            Serial.println("Characteristic pointer acquired.");
+          } else {
+            Serial.println("Characteristic not found in cached service.");
+          }
+        } else {
+          Serial.println("Service pointer not set. Set service first.");
+        }
+        Serial.println("OK");
+      }
     }
   }
-  // Set and cache remote service UUID for writing
+  // Read using cached pointers or fallback read:
+  // AT+BLEREAD=<clientId> or AT+BLEREAD=<clientId>,<service_uuid>,<char_uuid>
+  else if (cmd.startsWith("AT+BLEREAD=")) {
+    String params = cmd.substring(String("AT+BLEREAD=").length());
+    int firstComma = params.indexOf(",");
+    if (firstComma == -1) {
+      int clientId = params.toInt();
+      if (clientConnections.find(clientId) == clientConnections.end()) {
+        Serial.println("ERROR: Client ID not found.");
+      } else {
+        readCachedCharacteristicMulti(clientConnections[clientId]);
+      }
+    } else {
+      int secondComma = params.indexOf(",", firstComma + 1);
+      if (secondComma == -1) {
+        Serial.println("ERROR: Invalid parameters. Use AT+BLEREAD=<clientId>,<service_uuid>,<char_uuid>");
+      } else {
+        String idStr = params.substring(0, firstComma);
+        String svcUuid = params.substring(firstComma + 1, secondComma);
+        String charUuid = params.substring(secondComma + 1);
+        idStr.trim();
+        svcUuid.trim();
+        charUuid.trim();
+        int clientId = idStr.toInt();
+        if (clientConnections.find(clientId) == clientConnections.end()) {
+          Serial.println("ERROR: Client ID not found.");
+        } else {
+          readCharacteristicMulti(clientConnections[clientId], svcUuid, charUuid);
+        }
+      }
+    }
+    Serial.println("OK");
+  }
+  // Enable notifications: AT+BLENOTIFY=<clientId>
+  else if (cmd.startsWith("AT+BLENOTIFY=")) {
+    String idStr = cmd.substring(String("AT+BLENOTIFY=").length());
+    idStr.trim();
+    int clientId = idStr.toInt();
+    if (clientConnections.find(clientId) == clientConnections.end()) {
+      Serial.println("ERROR: Client ID not found.");
+    } else {
+      BLEClientConnection* connection = clientConnections[clientId];
+      if (connection->remoteCharacteristicPtr == nullptr) {
+        Serial.println("ERROR: Characteristic pointer not set. Use AT+BLESETSERVICE and AT+BLESETCHAR first.");
+      } else {
+        connection->remoteCharacteristicPtr->registerForNotify(notifyCallback);
+        notifyMap[connection->remoteCharacteristicPtr] = clientId;
+        Serial.println("Notifications enabled");
+      }
+    }
+  }
+  // Disable notifications: AT+BLENOTIFYOFF=<clientId>
+  else if (cmd.startsWith("AT+BLENOTIFYOFF=")) {
+    String idStr = cmd.substring(String("AT+BLENOTIFYOFF=").length());
+    idStr.trim();
+    int clientId = idStr.toInt();
+    if (clientConnections.find(clientId) == clientConnections.end()) {
+      Serial.println("ERROR: Client ID not found.");
+    } else {
+      BLEClientConnection* connection = clientConnections[clientId];
+      if (connection->remoteCharacteristicPtr == nullptr) {
+        Serial.println("ERROR: Characteristic pointer not set.");
+      } else {
+        connection->remoteCharacteristicPtr->registerForNotify(nullptr);
+        notifyMap.erase(connection->remoteCharacteristicPtr);
+        Serial.println("Notifications disabled");
+      }
+    }
+  }
+  // Set and cache remote service UUID for writing: AT+BLESETWRITESERVICE=<clientId>,<service_uuid>
   else if (cmd.startsWith("AT+BLESETWRITESERVICE=")) {
-    String svcUuid = cmd.substring(String("AT+BLESETWRITESERVICE=").length());
-    svcUuid.trim();
-    globalWriteServiceUUID = svcUuid;
-    Serial.print("Write Service UUID set to: ");
-    Serial.println(globalWriteServiceUUID);
-    if (pClient != nullptr && pClient->isConnected()) {
-      remoteWriteServicePtr = pClient->getService(BLEUUID(globalWriteServiceUUID.c_str()));
-      if (remoteWriteServicePtr != nullptr) {
-        Serial.println("Write Service pointer acquired.");
-        if (globalWriteCharacteristicUUID.length() > 0) {
-          remoteWriteCharacteristicPtr = remoteWriteServicePtr->getCharacteristic(BLEUUID(globalWriteCharacteristicUUID.c_str()));
-          if (remoteWriteCharacteristicPtr != nullptr) {
+    String params = cmd.substring(String("AT+BLESETWRITESERVICE=").length());
+    int commaIndex = params.indexOf(",");
+    if (commaIndex == -1) {
+      Serial.println("ERROR: Invalid parameters. Use AT+BLESETWRITESERVICE=<clientId>,<service_uuid>");
+    } else {
+      String idStr = params.substring(0, commaIndex);
+      String svcUuid = params.substring(commaIndex + 1);
+      idStr.trim();
+      svcUuid.trim();
+      int clientId = idStr.toInt();
+      if (clientConnections.find(clientId) == clientConnections.end()) {
+        Serial.println("ERROR: Client ID not found.");
+      } else {
+        BLEClientConnection* connection = clientConnections[clientId];
+        connection->writeServiceUUID = svcUuid;
+        Serial.print("Write Service UUID set to: ");
+        Serial.println(svcUuid);
+        if (connection->client != nullptr && connection->client->isConnected()) {
+          connection->remoteWriteServicePtr = connection->client->getService(BLEUUID(svcUuid.c_str()));
+          if (connection->remoteWriteServicePtr != nullptr) {
+            Serial.println("Write Service pointer acquired.");
+            if (connection->writeCharacteristicUUID.length() > 0) {
+              connection->remoteWriteCharacteristicPtr = connection->remoteWriteServicePtr->getCharacteristic(BLEUUID(connection->writeCharacteristicUUID.c_str()));
+              if (connection->remoteWriteCharacteristicPtr != nullptr) {
+                Serial.println("Write Characteristic pointer acquired.");
+              } else {
+                Serial.println("Write Characteristic pointer not found.");
+              }
+            }
+          } else {
+            Serial.println("Write Service not found on remote device.");
+          }
+        } else {
+          Serial.println("Not connected to any device. Write pointer caching deferred.");
+        }
+        Serial.println("OK");
+      }
+    }
+  }
+  // Set and cache remote characteristic UUID for writing: AT+BLESETWRITECHAR=<clientId>,<char_uuid>
+  else if (cmd.startsWith("AT+BLESETWRITECHAR=")) {
+    String params = cmd.substring(String("AT+BLESETWRITECHAR=").length());
+    int commaIndex = params.indexOf(",");
+    if (commaIndex == -1) {
+      Serial.println("ERROR: Invalid parameters. Use AT+BLESETWRITECHAR=<clientId>,<char_uuid>");
+    } else {
+      String idStr = params.substring(0, commaIndex);
+      String charUuid = params.substring(commaIndex + 1);
+      idStr.trim();
+      charUuid.trim();
+      int clientId = idStr.toInt();
+      if (clientConnections.find(clientId) == clientConnections.end()) {
+        Serial.println("ERROR: Client ID not found.");
+      } else {
+        BLEClientConnection* connection = clientConnections[clientId];
+        connection->writeCharacteristicUUID = charUuid;
+        Serial.print("Write Characteristic UUID set to: ");
+        Serial.println(charUuid);
+        if (connection->remoteWriteServicePtr != nullptr) {
+          connection->remoteWriteCharacteristicPtr = connection->remoteWriteServicePtr->getCharacteristic(BLEUUID(charUuid.c_str()));
+          if (connection->remoteWriteCharacteristicPtr != nullptr) {
             Serial.println("Write Characteristic pointer acquired.");
           } else {
-            Serial.println("Write Characteristic pointer not found.");
+            Serial.println("Write Characteristic not found in cached write service.");
           }
+        } else {
+          Serial.println("Write Service pointer not set. Set write service first.");
         }
-      } else {
-        Serial.println("Write Service not found on remote device.");
+        Serial.println("OK");
       }
-    } else {
-      Serial.println("Not connected to any device. Write pointer caching deferred.");
     }
   }
-  // Set and cache remote characteristic UUID for writing
-  else if (cmd.startsWith("AT+BLESETWRITECHAR=")) {
-    String charUuid = cmd.substring(String("AT+BLESETWRITECHAR=").length());
-    charUuid.trim();
-    globalWriteCharacteristicUUID = charUuid;
-    Serial.print("Write Characteristic UUID set to: ");
-    Serial.println(globalWriteCharacteristicUUID);
-    if (remoteWriteServicePtr != nullptr) {
-      remoteWriteCharacteristicPtr = remoteWriteServicePtr->getCharacteristic(BLEUUID(globalWriteCharacteristicUUID.c_str()));
-      if (remoteWriteCharacteristicPtr != nullptr) {
-        Serial.println("Write Characteristic pointer acquired.");
-      } else {
-        Serial.println("Write Characteristic not found in cached write service.");
-      }
-    } else {
-      Serial.println("Write Service pointer not set. Set write service first.");
-    }
-  }
-  // Write data to the cached write characteristic
+  // Write data to the cached write characteristic: AT+BLEWRITE=<clientId>,<data>
   else if (cmd.startsWith("AT+BLEWRITE=")) {
-    String data = cmd.substring(String("AT+BLEWRITE=").length());
-    data.trim();
-    if (remoteWriteCharacteristicPtr == nullptr) {
-      Serial.println("ERROR: Write Characteristic pointer not set. Use AT+BLESETWRITESERVICE and AT+BLESETWRITECHAR first.");
+    String params = cmd.substring(String("AT+BLEWRITE=").length());
+    int commaIndex = params.indexOf(",");
+    if (commaIndex == -1) {
+      Serial.println("ERROR: Invalid parameters. Use AT+BLEWRITE=<clientId>,<data>");
     } else {
-      remoteWriteCharacteristicPtr->writeValue(data.c_str(), data.length());
-      Serial.println("Data written");
+      String idStr = params.substring(0, commaIndex);
+      String data = params.substring(commaIndex + 1);
+      idStr.trim();
+      data.trim();
+      int clientId = idStr.toInt();
+      if (clientConnections.find(clientId) == clientConnections.end()) {
+        Serial.println("ERROR: Client ID not found.");
+      } else {
+        BLEClientConnection* connection = clientConnections[clientId];
+        if (connection->remoteWriteCharacteristicPtr == nullptr) {
+          Serial.println("ERROR: Write Characteristic pointer not set. Use AT+BLESETWRITESERVICE and AT+BLESETWRITECHAR first.");
+        } else {
+          connection->remoteWriteCharacteristicPtr->writeValue(data.c_str(), data.length());
+          Serial.println("Data written");
+        }
+      }
     }
+    Serial.println("OK");
   }
   else {
     Serial.println("ERROR: Unknown Command");
