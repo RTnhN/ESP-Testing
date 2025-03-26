@@ -30,37 +30,35 @@ def read_and_print(ser):
             break
 
 
-# Regular expression to capture notification lines.
-# Expected format example:
-#   Notification received from client 2 (hex): 02 FF FF 00 00 0B ...
 notification_pattern = re.compile(
-    r"Notification received from client (\d+)\s+\(hex\):\s*(.*)"
+    r"^(?P<client>[0-9A-Fa-f]{2})\s+FF\s+FF\s+(?P<seq>(?:[0-9A-Fa-f]{2}\s+){3}[0-9A-Fa-f]{2}).*$"
 )
 
 
 def process_line(line, port_name):
-    """Process a line of text from the serial port and update packet drop count."""
+    """Process a line of hex data from the serial port and update packet drop count."""
     line = line.strip()
-    match = notification_pattern.search(line)
+    match = notification_pattern.match(line)
     if match:
-        client_id = int(match.group(1))
-        hex_data_str = match.group(2)
-        # Split the hex bytes (assumed to be space-separated)
-        hex_bytes = [b for b in hex_data_str.split() if b]
-        # Now expecting at least 6 bytes:
-        # Byte 0: client number, Bytes 1-2: default header, Bytes 3-5: 3-byte sequence number
-        if len(hex_bytes) >= 6:
+        try:
+            # Convert the client id from hex to integer (e.g., "01" -> 1)
+            client_id = int(match.group("client"), 16)
+        except Exception as e:
+            print(f"[{port_name}] Error parsing client id: {e}")
+            return
+
+        seq_str = match.group("seq")
+        seq_bytes = seq_str.split()
+        if len(seq_bytes) == 4:
             try:
-                # Extract the sequence number from bytes 3 to 5 (big-endian)
-                seq_hex = "".join(hex_bytes[3:6])
-                seq_num = int(seq_hex, 16)
+                # Combine the four hex pairs into a single sequence number (big-endian)
+                seq_num = int("".join(seq_bytes), 16)
             except Exception as e:
                 print(f"[{port_name}] Error parsing sequence number: {e}")
                 return
 
             with stats_lock:
                 if client_id not in client_stats:
-                    # First packet from this client
                     client_stats[client_id] = {"last_seq": seq_num, "dropped": 0}
                     print(
                         f"[{port_name}] Client {client_id}: First packet with sequence {seq_num}."
@@ -69,27 +67,20 @@ def process_line(line, port_name):
                     last_seq = client_stats[client_id]["last_seq"]
                     expected_seq = last_seq + 1
                     if seq_num != expected_seq:
-                        # Calculate how many packets were dropped
                         dropped = (
-                            (seq_num - expected_seq) if seq_num > expected_seq else 0
+                            seq_num - expected_seq if seq_num > expected_seq else 0
                         )
                         client_stats[client_id]["dropped"] += dropped
                         print(
                             f"[{port_name}] Client {client_id}: Detected {dropped} dropped packets (last: {last_seq}, current: {seq_num})."
                         )
-                    else:
-                        print(
-                            f"[{port_name}] Client {client_id}: Packet received with sequence {seq_num}."
-                        )
-                    # Update last sequence number for this client
                     client_stats[client_id]["last_seq"] = seq_num
         else:
             print(
-                f"[{port_name}] Client {match.group(1)}: Insufficient data to extract sequence: {hex_bytes}"
+                f"[{port_name}] Client {match.group('client')}: Insufficient data for sequence number: {seq_str}"
             )
     else:
-        # For lines that do not match the notification pattern
-        print(f"[{port_name}] {line}")
+        print(f"[{port_name}] Unrecognized format: {line}")
 
 
 def serial_thread(port_name, baudrate, address_subset):
