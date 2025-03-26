@@ -61,9 +61,9 @@ void notifyCallback(
   if (notifyMap.find(pBLERemoteCharacteristic) != notifyMap.end()) {
     clientId = notifyMap[pBLERemoteCharacteristic];
   }
-  Serial.print("Notification received from client ");
-  Serial.print(clientId);
-  Serial.print(" (hex): ");
+  Serial.print("0");
+  Serial.print(clientId, HEX);
+  Serial.print(" ");
   for (size_t i = 0; i < length; i++) {
     uint8_t byte = pData[i];
     if (byte < 0x10) Serial.print("0");
@@ -80,17 +80,8 @@ void notifyCallback(
 void startBLE() {
   if (!bleInitialized) {
     BLEDevice::init("ESP32-AT");
-    pServer = BLEDevice::createServer();
-    pService = pServer->createService(SERVER_SERVICE_UUID);
-    pCharacteristic = pService->createCharacteristic(
-                        SERVER_CHARACTERISTIC_UUID,
-                        BLECharacteristic::PROPERTY_READ |
-                        BLECharacteristic::PROPERTY_WRITE
-                      );
-    pCharacteristic->setValue("Hello World");
-    pService->start();
     bleInitialized = true;
-    Serial.println("BLE initialized (server mode)");
+    Serial.println("BLE initialized");
   } else {
     Serial.println("BLE already initialized");
   }
@@ -98,13 +89,7 @@ void startBLE() {
 
 void stopBLE() {
   if (bleInitialized) {
-    if (bleAdvertising) {
-      BLEDevice::getAdvertising()->stop();
-      bleAdvertising = false;
-      Serial.println("BLE advertising stopped");
-    }
-    bleInitialized = false;
-    Serial.println("BLE deinitialized (simulated)");
+    Serial.println("OK");
   } else {
     Serial.println("BLE not initialized");
   }
@@ -144,6 +129,10 @@ void stopAdvertising() {
 // Client Mode Functions   //
 //-------------------------//
 
+void setClientName(String name) {
+    clientName = name;
+}
+
 void scanBLEDevices() {
   if (!bleInitialized) {
     BLEDevice::init("ESP32-AT");
@@ -154,15 +143,11 @@ void scanBLEDevices() {
   pBLEScan->setActiveScan(true);
   BLEScanResults foundDevices = pBLEScan->start(5, false);
   int count = foundDevices.getCount();
-  Serial.printf("Devices found: %d\n", count);
   for (int i = 0; i < count; i++) {
     BLEAdvertisedDevice device = foundDevices.getDevice(i);
-    Serial.printf("Device %d: %s, RSSI: %d\n", i + 1, device.getAddress().toString().c_str(), device.getRSSI());
-    if (device.haveName()) {
-      Serial.printf("   Name: %s\n", device.getName().c_str());
-    }
-    if (device.haveServiceUUID()) {
-      Serial.printf("   Service UUID: %s\n", device.getServiceUUID().toString().c_str());
+    if ((device.haveName() && device.getName() == clientName.c_str()) || (clientName.length() == 0)) {
+      Serial.printf("%s", device.getAddress().toString().c_str());
+      Serial.println();
     }
   }
   pBLEScan->clearResults();
@@ -175,6 +160,11 @@ int connectToDeviceMulti(String deviceAddress) {
   BLEAddress addr(deviceAddress.c_str());
   if (newClient->connect(addr)) {
     Serial.println("Connected to device: " + deviceAddress);
+    if(newClient->setMTU(128)) {
+      Serial.println("MTU set to 128");
+    } else {
+      Serial.println("MTU negotiation failed or not supported");
+    }
     BLEClientConnection* connection = new BLEClientConnection();
     connection->client = newClient;
     connection->deviceAddress = deviceAddress;
@@ -289,12 +279,10 @@ void processATCommand(String cmd) {
     stopBLE();
     Serial.println("OK");
   }
-  else if (cmd == "AT+BLEADVERTISE=ON") {
-    startAdvertising();
-    Serial.println("OK");
-  }
-  else if (cmd == "AT+BLEADVERTISE=OFF") {
-    stopAdvertising();
+  else if (cmd.startsWith("AT+BLESETCLIENTNAME=")) {
+    String name = cmd.substring(String("AT+BLESETCLIENTNAME=").length());
+    name.trim();
+    setClientName(name);
     Serial.println("OK");
   }
   else if (cmd == "AT+BLESCAN") {
@@ -305,6 +293,10 @@ void processATCommand(String cmd) {
   else if (cmd.startsWith("AT+BLECONNECT=")) {
     String addr = cmd.substring(String("AT+BLECONNECT=").length());
     addr.trim();
+    if (!bleInitialized) {
+      Serial.println("ERROR: BLE not initialized.");
+      return;
+    }
     int clientId = connectToDeviceMulti(addr);
     if (clientId != -1) {
       Serial.print("OK, Client ID: ");
@@ -447,6 +439,7 @@ void processATCommand(String cmd) {
         connection->remoteCharacteristicPtr->registerForNotify(notifyCallback);
         notifyMap[connection->remoteCharacteristicPtr] = clientId;
         Serial.println("Notifications enabled");
+        Serial.println("OK");  
       }
     }
   }
@@ -465,6 +458,7 @@ void processATCommand(String cmd) {
         connection->remoteCharacteristicPtr->registerForNotify(nullptr);
         notifyMap.erase(connection->remoteCharacteristicPtr);
         Serial.println("Notifications disabled");
+        Serial.println("OK");
       }
     }
   }
@@ -574,13 +568,12 @@ void processATCommand(String cmd) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
   while (!Serial) { ; }  // Wait for serial port
   Serial.println("AT Command Firmware Starting");
 }
 
 void loop() {
-  // Read incoming characters from Serial and process complete commands
   while (Serial.available()) {
     char inChar = (char)Serial.read();
     if (inChar == '\n' || inChar == '\r') {
